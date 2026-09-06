@@ -1,9 +1,16 @@
+# Hosted: Streamlit Community Cloud installs exactly this list.
 # Local:  python -m pip install -r requirements.txt
-# Hosted: Streamlit Community Cloud installs this automatically.
 streamlit>=1.37          # 1.37+ needed for st.fragment(run_every=...)
 pandas>=2.0
 numpy>=1.24
-opencv-python>=4.8       # optical channel + the HSV tuner windows
-pyserial>=3.5            # USB link to the ESP32 (local runs only)
-# optional - only if the node publishes over MQTT rather than HTTP/serial
+pyserial>=3.5            # USB link to the ESP32 (does nothing on a server)
+
+# NOT installed on the server, on purpose.
+# The optical channel needs a camera, which a hosted container does not have,
+# and OpenCV drags in system libraries that break the Streamlit Cloud build.
+# The dashboard detects its absence and runs on chemical + thermal + IR.
+# For the camera locally:
+#     python -m pip install opencv-python
+#
+# optional - only if the node publishes over MQTT rather than USB/HTTP
 # paho-mqtt>=1.6

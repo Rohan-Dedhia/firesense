@@ -52,9 +52,14 @@ Close the Arduino Serial Monitor first — only one program may hold a COM port.
 
    Save. The app restarts and the sidebar will read *Telegram: configured*.
 
-`requirements.txt` and `packages.txt` are already set up — `packages.txt`
-installs the two system libraries OpenCV needs, without which the build fails
-with a `libGL.so.1` error.
+`requirements.txt` deliberately does **not** install OpenCV. A hosted container
+has no camera, so the optical channel could never run there anyway, and OpenCV
+pulls in system libraries (`libglib2.0-0`, `libffi7`) that no longer resolve on
+Streamlit Cloud's current Debian base — the build fails with *"held broken
+packages"*. Leaving it out makes the deploy both faster and reliable; the
+dashboard notices OpenCV is missing and runs on chemical + thermal + IR.
+
+Locally, `python -m pip install opencv-python` re-enables the camera.
 
 ---
 
@@ -74,7 +79,9 @@ Because the token now lives in `.streamlit/secrets.toml` rather than in
 
 ## If the hosted app misbehaves
 
-- **Build fails on OpenCV** — confirm `packages.txt` reached the repo.
+- **Build fails on `libglib2.0-0` / "held broken packages"** — a `packages.txt`
+  has crept back into the repo, or OpenCV is back in `requirements.txt`.
+  Neither belongs there; delete and push again.
 - **Sidebar says Telegram not configured** — the Secrets were saved but the app
   was not restarted; use *Manage app → Reboot*.
 - **App sleeps** — free Community Cloud apps idle out. Opening the URL wakes
