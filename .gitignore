@@ -1,0 +1,9 @@
+# never commit real credentials
+.streamlit/secrets.toml
+
+__pycache__/
+*.pyc
+logs/
+*.zip
+.venv/
+venv/

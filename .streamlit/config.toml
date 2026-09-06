@@ -1,0 +1,13 @@
+# FireSense - Streamlit appearance and server behaviour.
+# Applies both locally and when hosted.
+
+[theme]
+primaryColor = "#dc2626"
+font = "sans serif"
+
+[server]
+# The dashboard streams; keep the browser tab alive rather than reloading it.
+runOnSave = false
+
+[browser]
+gatherUsageStats = false

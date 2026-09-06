@@ -1,0 +1,9 @@
+# Local:  python -m pip install -r requirements.txt
+# Hosted: Streamlit Community Cloud installs this automatically.
+streamlit>=1.37          # 1.37+ needed for st.fragment(run_every=...)
+pandas>=2.0
+numpy>=1.24
+opencv-python>=4.8       # optical channel + the HSV tuner windows
+pyserial>=3.5            # USB link to the ESP32 (local runs only)
+# optional - only if the node publishes over MQTT rather than HTTP/serial
+# paho-mqtt>=1.6
