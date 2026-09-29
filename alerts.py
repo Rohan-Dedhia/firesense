@@ -69,7 +69,7 @@ class AlertManager:
             f"Risk {result.score:.0f}/100  (confidence {result.confidence:.0f} %)\n"
             f"Gas {result.gas_compensated:.0f} ppm | {result.temp_c:.1f} C | "
             f"{result.humidity_pct:.0f} %RH | flame: "
-            f"{'YES' if result.visual_fire else 'no'}\n"
+            f"{'YES' if result.flame_sensor else 'no'}\n"
             f"Pattern: {result.signature}{eta}\n"
             f"{result.explanation}"
         )
@@ -88,14 +88,12 @@ def append_log(result, path: Path | None = None) -> Path:
         "environment": result.environment,
         "gas_raw": result.gas_raw, "gas_compensated": result.gas_compensated,
         "temp_c": result.temp_c, "humidity_pct": result.humidity_pct,
-        "visual_fire": result.visual_fire, "visual_conf": result.visual_confidence,
-        # the ignition channels - without these a log cannot explain why an
+        # the ignition channel - without these a log cannot explain why an
         # event was or was not classified as a fire
         "flame_sensor": result.flame_sensor,
         "flame_available": result.flame_available,
         "ignition_score": result.ignition_score,
         "gas_score": result.gas_score, "temp_score": result.temp_score,
-        "visual_score": result.visual_score,
         "score": result.score, "level": result.level,
         "confidence": result.confidence, "signature": result.signature,
         "suppressed": result.suppressed,

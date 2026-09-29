@@ -15,7 +15,7 @@ import fusion                 # noqa: E402
 from mock_source import MockNode   # noqa: E402
 
 
-def run(scenario, n=90, env="Kitchen", visual_from=None, calibrate=True, dt=1.0):
+def run(scenario, n=90, env="Kitchen", calibrate=True, dt=1.0):
     """Drive the engine with a scenario on a synthetic 1 Hz clock."""
     eng = fusion.FusionEngine(env)
     node = MockNode(scenario, seed=7)
@@ -29,11 +29,8 @@ def run(scenario, n=90, env="Kitchen", visual_from=None, calibrate=True, dt=1.0)
         t0 += 60 * dt
     out = []
     for i in range(n):
-        r, flame = node.next()
-        vis = flame if visual_from is None else (i >= visual_from)
-        out.append(eng.update(r, visual_fire=vis,
-                              visual_confidence=85.0 if vis else 0.0,
-                              now=t0 + i * dt))
+        r, _ = node.next()
+        out.append(eng.update(r, now=t0 + i * dt))
     return eng, out
 
 
@@ -126,8 +123,8 @@ def test_calibration_ignores_readings_during_an_event():
     eng = fusion.FusionEngine("Storage Room")
     node = MockNode("sudden_fire", seed=5)
     for i in range(40):
-        r, flame = node.next()
-        eng.update(r, visual_fire=flame, visual_confidence=90.0, now=1_000 + i)
+        r, _ = node.next()
+        eng.update(r, now=1_000 + i)
     # an event must not be absorbed into "normal"
     assert eng.calibrator.profile()["gas_normal_max"] <= \
         C.ENVIRONMENT_PROFILES["Storage Room"]["gas_normal_max"] * C.CALIBRATION_MAX_GROWTH
@@ -139,23 +136,29 @@ def test_sensor_fault_is_flagged():
     assert any(r.flags for r in res), "impossible sensor values were not flagged"
 
 
-def test_visual_only_trigger_is_flagged_as_disagreement():
+def test_flame_without_any_chemical_or_thermal_rise_is_flagged():
+    """The IR sensor alone, in otherwise clean air, is worth alarming on - but
+    the operator must be told the other channels do not corroborate it."""
     eng = fusion.FusionEngine("Kitchen")
     eng.calibrator.done = True
-    r = eng.update({"gas_ppm": 60, "temp_c": 24, "humidity_pct": 55},
-                   visual_fire=True, visual_confidence=95.0, now=1.0)
-    assert any("Optical channel reports flame" in f for f in r.flags)
+    quiet = {"gas_ppm": 60, "temp_c": 24, "humidity_pct": 55, "flame_detected": True}
+    for i in range(C.FLAME_CONFIRM_SAMPLES):
+        r = eng.update(dict(quiet), now=1.0 + i)
+    assert r.flame_sensor
+    assert any("IR flame sensor triggered" in f for f in r.flags)
 
 
-def test_camera_offline_is_reported_and_penalises_confidence():
+def test_no_flame_sensor_is_reported_and_penalises_confidence():
+    """With no ignition channel at all the system still runs, but says so and
+    trusts itself less."""
     eng = fusion.FusionEngine("Kitchen")
     eng.calibrator.done = True
-    on = eng.update({"gas_ppm": 100, "temp_c": 25, "humidity_pct": 55},
-                    visual_available=True, now=1.0)
-    off = eng.update({"gas_ppm": 100, "temp_c": 25, "humidity_pct": 55},
-                     visual_available=False, now=2.0)
-    assert off.confidence < on.confidence
-    assert any("No ignition channel available" in f for f in off.flags)
+    with_ir = eng.update({"gas_ppm": 100, "temp_c": 25, "humidity_pct": 55,
+                          "flame_detected": False}, now=1.0)
+    without = eng.update({"gas_ppm": 100, "temp_c": 25, "humidity_pct": 55},
+                         now=2.0)
+    assert without.confidence < with_ir.confidence
+    assert any("No ignition channel available" in f for f in without.flags)
 
 
 # --- countdown ------------------------------------------------------------
@@ -176,11 +179,21 @@ def test_countdown_shrinks_as_the_event_develops():
 
 
 # --- IR flame sensor (added once the sensor was wired) --------------------
+# The IR flame sensor is the only ignition channel, so tests that toggle it
+# MUST put it back the way they found it - a leaked False silently disables
+# ignition for every test that runs afterwards.
+_FLAME_DEFAULT = C.FLAME_SENSOR_PRESENT
+
+
 def _with_flame(present=True):
     C.FLAME_SENSOR_PRESENT = present
 
 
-def test_flame_sensor_alone_reaches_critical_with_no_camera():
+def _restore_flame():
+    C.FLAME_SENSOR_PRESENT = _FLAME_DEFAULT
+
+
+def test_flame_sensor_alone_reaches_critical():
     """A wired IR sensor must be able to confirm ignition on its own."""
     _with_flame(True)
     try:
@@ -188,60 +201,69 @@ def test_flame_sensor_alone_reaches_critical_with_no_camera():
         eng.calibrator.done = True
         reading = {"gas_ppm": 320, "temp_c": 44, "humidity_pct": 45,
                    "flame_detected": True}
-        eng.update(reading, visual_available=False, now=1.0)   # debounce sample
-        r = eng.update(reading, visual_available=False, now=2.0)
+        eng.update(reading, now=1.0)   # debounce sample
+        r = eng.update(reading, now=2.0)
         assert r.flame_available and r.flame_sensor
         assert r.ignition_score >= C.IGNITION_IR_ONLY
         assert r.level == "CRITICAL", (r.level, r.score)
     finally:
-        _with_flame(False)
+        _restore_flame()
 
 
-def test_both_ignition_channels_agreeing_beats_either_alone():
+def test_confirmed_flame_escalates_above_the_same_reading_without_it():
+    """The ignition channel is an escalator: identical chemistry and thermals,
+    plus a confirmed flame, must score strictly higher and never lower."""
     _with_flame(True)
     try:
         base = {"gas_ppm": 200, "temp_c": 30, "humidity_pct": 45}
-        def score(flame, vis):
+
+        def score(flame):
             eng = fusion.FusionEngine("Kitchen")
             eng.calibrator.done = True
             r = None
-            for t in (1.0, 2.0):        # two samples: satisfies the IR debounce
-                r = eng.update({**base, "flame_detected": flame},
-                               visual_fire=vis, visual_confidence=85.0,
-                               visual_available=True, now=t)
-            return r.score
-        both = score(True, True)
-        ir_only = score(True, False)
-        cam_only = score(False, True)
-        assert both > ir_only and both > cam_only
+            for t in range(C.FLAME_CONFIRM_SAMPLES + 1):   # satisfy the debounce
+                r = eng.update({**base, "flame_detected": flame}, now=1.0 + t)
+            return r
+
+        with_flame = score(True)
+        without = score(False)
+        assert with_flame.score > without.score
+        assert with_flame.ignition_score == C.IGNITION_IR_ONLY
+        assert without.ignition_score == 0.0
+        # and the hard floor applies, not merely the weighted contribution
+        assert with_flame.score >= C.IGNITION_FLOOR_WARNING
     finally:
-        _with_flame(False)
+        _restore_flame()
 
 
-def test_ignition_channels_disagreeing_is_flagged():
+def test_chemical_anomaly_without_ignition_is_flagged_for_verification():
+    """Gas high but the IR sensor sees nothing: alarm, but tell the operator the
+    source may simply be outside the sensor's line of sight."""
     _with_flame(True)
     try:
-        eng = fusion.FusionEngine("Kitchen")
+        eng = fusion.FusionEngine("Storage Room")
         eng.calibrator.done = True
-        reading = {"gas_ppm": 300, "temp_c": 40, "humidity_pct": 45,
-                   "flame_detected": True}
-        eng.update(reading, visual_fire=False, visual_available=True, now=1.0)
-        r = eng.update(reading, visual_fire=False, visual_available=True, now=2.0)
-        assert any("Ignition channels disagree" in f for f in r.flags)
+        r = eng.update({"gas_ppm": 380, "temp_c": 27, "humidity_pct": 45,
+                        "flame_detected": False}, now=1.0)
+        assert r.gas_score > 60
+        assert any("without ignition confirmation" in f for f in r.flags)
     finally:
-        _with_flame(False)
+        _restore_flame()
 
 
 def test_flame_field_is_ignored_until_the_sensor_is_declared():
     """The ESP32 always sends the field; software must ignore it until wired."""
     _with_flame(False)
-    eng = fusion.FusionEngine("Kitchen")
-    eng.calibrator.done = True
-    r = eng.update({"gas_ppm": 100, "temp_c": 25, "humidity_pct": 55,
-                    "flame_detected": True}, visual_available=False, now=1.0)
-    assert not r.flame_available and not r.flame_sensor
-    assert r.ignition_score == 0.0
-    assert r.level == "NORMAL"
+    try:
+        eng = fusion.FusionEngine("Kitchen")
+        eng.calibrator.done = True
+        r = eng.update({"gas_ppm": 100, "temp_c": 25, "humidity_pct": 55,
+                        "flame_detected": True}, now=1.0)
+        assert not r.flame_available and not r.flame_sensor
+        assert r.ignition_score == 0.0
+        assert r.level == "NORMAL"
+    finally:
+        _restore_flame()
 
 
 def test_flame_sensor_clears_the_cooking_suppression():
@@ -262,7 +284,7 @@ def test_flame_sensor_clears_the_cooking_suppression():
         assert not res.suppressed, "ignition must clear the cooking latch"
         assert res.level in ("WARNING", "CRITICAL")
     finally:
-        _with_flame(False)
+        _restore_flame()
 
 
 def test_calibration_holds_while_the_sensor_is_still_warming_up():
@@ -314,8 +336,7 @@ def test_no_absolute_alarm_while_calibrating_but_ignition_still_alarms():
     assert any("Still calibrating" in f for f in r.flags)
 
     fire = fusion.FusionEngine("Storage Room")
-    r2 = fire.update({"gas_ppm": 5000, "temp_c": 60, "humidity_pct": 40},
-                     visual_fire=True, visual_confidence=95.0, now=1.0)
+    r2 = fire.update({"gas_ppm": 5000, "temp_c": 60, "humidity_pct": 40}, now=1.0)
     assert r2.level != "NORMAL", "ignition must alarm even during calibration"
 
 
@@ -354,7 +375,7 @@ def test_calibration_gives_up_gracefully_when_never_quiet():
     node = MockNode("sudden_fire", seed=3)
     for i in range(int(C.CALIBRATION_GIVE_UP_S) + 30):
         r, flame = node.next()
-        eng.update(r, visual_fire=flame, visual_confidence=90.0 if flame else 0.0,
+        eng.update(r,
                    now=1_000 + i)
     assert eng.calibrator.done
     prof = eng.calibrator.profile()
@@ -415,12 +436,11 @@ def test_flame_debounce_matches_the_configured_setting():
         eng.calibrator.done = True
         quiet = {"gas_ppm": 100, "temp_c": 26, "humidity_pct": 55,
                  "flame_detected": False}
-        eng.update(quiet, visual_available=False, now=0.0)
+        eng.update(quiet, now=0.0)
 
         res = None
         for i in range(1, need + 1):
-            res = eng.update({**quiet, "flame_detected": True},
-                             visual_available=False, now=float(i))
+            res = eng.update({**quiet, "flame_detected": True}, now=float(i))
             if i < need:                       # not yet confirmed
                 assert not res.flame_sensor, f"trusted after only {i} sample(s)"
                 assert res.level == "NORMAL"
@@ -479,6 +499,6 @@ def test_a_fast_smoke_burst_is_never_suppressed_as_cooking():
         res = eng.update({"gas_ppm": 400 + i * 40,      # fast burst
                           "temp_c": 29.3 + i * 0.01,    # barely moves
                           "humidity_pct": 72 + i * 0.12},  # combustion vapour
-                         visual_available=False, now=1_000 + i)
+                         now=1_000 + i)
     assert not res.suppressed, "a fast smoke burst was excused as cooking"
     assert res.level != "NORMAL", "smouldering smoke did not raise an alarm"

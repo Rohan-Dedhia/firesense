@@ -13,7 +13,9 @@ def load(path):
             "gas_ppm": float(r["gas_raw"]),
             "temp_c": float(r["temp_c"]),
             "humidity_pct": float(r["humidity_pct"]),
-            "flame_detected": r["visual_fire"] == "True",
+            # older logs carry visual_fire; newer ones flame_sensor
+            "flame_detected": (r.get("flame_sensor")
+                               or r.get("visual_fire", "False")) == "True",
         }))
     return out
 

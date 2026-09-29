@@ -5,12 +5,5 @@ pandas>=2.0
 numpy>=1.24
 pyserial>=3.5            # USB link to the ESP32 (does nothing on a server)
 
-# NOT installed on the server, on purpose.
-# The optical channel needs a camera, which a hosted container does not have,
-# and OpenCV drags in system libraries that break the Streamlit Cloud build.
-# The dashboard detects its absence and runs on chemical + thermal + IR.
-# For the camera locally:
-#     python -m pip install opencv-python
-#
 # optional - only if the node publishes over MQTT rather than USB/HTTP
 # paho-mqtt>=1.6

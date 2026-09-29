@@ -1,11 +1,11 @@
 """
-FireSense - Day 1 environment check. Run this FIRST.
+FireSense - environment check. Run this FIRST.
 
     python check_setup.py
 
-Written for the Surface Pro 10 (Snapdragon X / Windows ARM64): the one real
-risk on that machine is the Python + OpenCV install, and 60 seconds here beats
-discovering it on Day 4.
+Confirms Python, the required packages, and that the fusion engine actually
+produces a score - sixty seconds here beats discovering a broken install on
+demo day.
 """
 import importlib
 import platform
@@ -27,7 +27,6 @@ print("-" * 62)
 ok = True
 for mod, why in [
     ("numpy", "maths"),
-    ("cv2", "webcam + HSV detection  (pip install opencv-python)"),
     ("pandas", "dashboard tables/charts"),
     ("streamlit", "dashboard"),
 ]:
@@ -37,21 +36,6 @@ for mod, why in [
     except Exception as exc:
         ok = False
         print(f"  MISS  {mod:<12} needed for {why}  [{exc}]")
-
-print("-" * 62)
-try:
-    import cv2
-    cap = cv2.VideoCapture(0)
-    if cap.isOpened():
-        got, frame = cap.read()
-        print(f"  OK    camera index 0 -> frame {frame.shape if got else 'none'}")
-        cap.release()
-    else:
-        ok = False
-        print("  MISS  camera index 0 did not open. Try index 1, and check")
-        print("        Settings > Privacy > Camera > let desktop apps use camera.")
-except Exception as exc:
-    print(f"  SKIP  camera test ({exc})")
 
 print("-" * 62)
 try:

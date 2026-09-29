@@ -32,7 +32,11 @@ class BaseSource:
         pass
 
     def read(self) -> tuple[Optional[dict], Optional[bool]]:
-        """Return (reading_dict, visual_flame_hint_or_None)."""
+        """Return (reading_dict, flame_hint_or_None).
+
+        The second element is legacy: ignition now travels inside the payload
+        as flame_detected. Kept so every source shares one read() shape.
+        """
         raise NotImplementedError
 
     def stop(self):
@@ -142,6 +146,32 @@ class SerialSource(BaseSource):
         except Exception:
             return []
         return [(p.device, p.description or "") for p in list_ports.comports()]
+
+    @staticmethod
+    def likely_ports() -> list[tuple[str, str]]:
+        """
+        The ports a USB-connected node could actually be on, best first.
+
+        macOS lists built-in pseudo-ports - /dev/cu.debug-console and
+        /dev/cu.Bluetooth-Incoming-Port - alongside real devices, and they
+        come first alphabetically. Auto-picking ports[0] therefore grabs the
+        debug console and fails with a confusing message about the Serial
+        Monitor. This filters them out and puts real USB-serial adapters
+        (CP210x, CH340, FTDI, native USB CDC) at the top.
+        """
+        good, rest = [], []
+        for dev, desc in SerialSource.list_ports():
+            low = f"{dev} {desc}".lower()
+            if any(bad in low for bad in
+                   ("debug-console", "bluetooth", "wlan-debug")):
+                continue
+            if any(tag in low for tag in
+                   ("usbserial", "usbmodem", "slab_usbtouart", "wchusbserial",
+                    "cp210", "ch340", "ch910", "ftdi", "silicon labs", "com")):
+                good.append((dev, desc))
+            else:
+                rest.append((dev, desc))
+        return good + rest
 
     def _open(self, baud: int):
         import serial
@@ -333,3 +363,42 @@ def make_source(kind: str, **kw) -> BaseSource:
     if kind == "serial":
         return SerialSource(**kw)
     raise ValueError(f"unknown source {kind!r}")
+
+
+# ---------------------------------------------------------------------------
+# diagnostic:  python ingest.py
+#
+# Prints every serial port the machine can see, marks the ones a node could
+# plausibly be on, and says which one the auto-pick would choose. Run this
+# first whenever record_session.py cannot find the node - it turns "it does
+# not work" into one line you can actually act on.
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":                                   # pragma: no cover
+    all_ports = SerialSource.list_ports()
+    good = SerialSource.likely_ports()
+    good_devs = {d for d, _ in good}
+
+    print()
+    if not all_ports:
+        print("  No serial ports at all.")
+        print("  - is pyserial installed?   pip install pyserial")
+        print("  - is the node plugged in, with a DATA cable (not charge-only)?")
+        print("  - on macOS an ESP32 usually needs the CP210x or CH340 driver")
+        raise SystemExit(0)
+
+    print(f"  {len(all_ports)} serial port(s) visible:")
+    print("  " + "-" * 58)
+    for dev, desc in all_ports:
+        mark = "  <- usable" if dev in good_devs else "     (ignored)"
+        print(f"    {dev:34s} {desc[:20]:20s}{mark}")
+    print("  " + "-" * 58)
+
+    if good:
+        print(f"\n  auto-pick would use:  {good[0][0]}")
+        print(f"  to force a different one:")
+        print(f"      python record_session.py normal --port {good[0][0]}")
+    else:
+        print("\n  None of these look like a node. The ports above are macOS")
+        print("  built-ins (debug console, Bluetooth), not your hardware.")
+        print("  Plug the ESP32 in and run this again.")
+    print()

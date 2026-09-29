@@ -1,6 +1,22 @@
 # never commit real credentials
 .streamlit/secrets.toml
 
+# recorded sessions - thousands of JPEGs. Git is the wrong tool for these;
+# share them through Google Drive / OneDrive instead. The regression fixture
+# in data/*.csv IS tracked, deliberately.
+data/sessions/
+data/alerts/
+data/feedback.csv
+data/.telegram_offset
+
+# trained model weights - too big for git, and rebuildable
+*.pt
+*.pth
+*.onnx
+*.joblib
+models/
+runs/
+
 __pycache__/
 *.pyc
 logs/

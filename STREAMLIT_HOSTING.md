@@ -3,13 +3,12 @@
 ## The one thing to know first
 
 A hosted app runs on Streamlit's server, not on your laptop. That server has
-no USB ports and no camera, so **it cannot see your ESP32 and it cannot see a
-webcam**. There is no setting that changes this — it is what "hosted" means.
+no USB ports, so **it cannot see your ESP32**. There is no setting that changes
+this — it is what "hosted" means.
 
 | | Local (`streamlit run app.py`) | Hosted on Streamlit Cloud |
 |---|---|---|
 | Serial (USB) — the live node | works | not possible |
-| Optical channel (webcam) | works | not possible |
 | Test Mode (synthetic scenarios) | works | works |
 | Replay an uploaded log | works | works |
 | HTTP endpoint | works if the node is reachable | only if the node is on the public internet |
@@ -19,9 +18,8 @@ So: **run it locally for the live demo in front of sir**, and use the hosted
 link as the shareable version — anyone can open the URL, run the scenarios, and
 upload a captured log to watch the engine reason over real readings.
 
-The app detects this by itself. Hosted, the Serial option explains that no
-ports are visible instead of throwing an error, and the camera toggle
-disappears if OpenCV cannot load.
+The app detects this by itself: hosted, the Serial option explains that no
+ports are visible instead of throwing an error.
 
 ---
 
@@ -52,14 +50,11 @@ Close the Arduino Serial Monitor first — only one program may hold a COM port.
 
    Save. The app restarts and the sidebar will read *Telegram: configured*.
 
-`requirements.txt` deliberately does **not** install OpenCV. A hosted container
-has no camera, so the optical channel could never run there anyway, and OpenCV
-pulls in system libraries (`libglib2.0-0`, `libffi7`) that no longer resolve on
-Streamlit Cloud's current Debian base — the build fails with *"held broken
-packages"*. Leaving it out makes the deploy both faster and reliable; the
-dashboard notices OpenCV is missing and runs on chemical + thermal + IR.
-
-Locally, `python -m pip install opencv-python` re-enables the camera.
+`requirements.txt` installs four pure-Python packages and nothing else — no
+system libraries, so there is no `packages.txt` and nothing for apt to fail on.
+Keep it that way: adding OpenCV back pulls in `libglib2.0-0` / `libffi7`, which
+no longer resolve on Streamlit Cloud's current Debian base and fail the build
+with *"held broken packages"*.
 
 ---
 
@@ -80,7 +75,7 @@ Because the token now lives in `.streamlit/secrets.toml` rather than in
 ## If the hosted app misbehaves
 
 - **Build fails on `libglib2.0-0` / "held broken packages"** — a `packages.txt`
-  has crept back into the repo, or OpenCV is back in `requirements.txt`.
+  has crept into the repo, or OpenCV has been added to `requirements.txt`.
   Neither belongs there; delete and push again.
 - **Sidebar says Telegram not configured** — the Secrets were saved but the app
   was not restarted; use *Manage app → Reboot*.

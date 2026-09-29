@@ -22,12 +22,9 @@ import os
 #   "flame_detected": false                      # bool - IR flame sensor
 # }
 #
-# flame_detected: set FLAME_SENSOR_PRESENT below to True once the IR flame
-# sensor is actually wired. Until then the ESP32 sends false and the software
-# ignores the field entirely, so the contract never changes either way.
-#
-# Visual detection (webcam HSV) is NOT in this payload - it is produced on the
-# laptop and merged locally at scoring time. See vision.py / README.
+# flame_detected: set FLAME_SENSOR_PRESENT below to False if the IR flame
+# sensor is ever removed. The ESP32 then sends false and the software ignores
+# the field entirely, so the contract never changes either way.
 REQUIRED_FIELDS = ("timestamp", "gas_ppm", "temp_c", "humidity_pct")
 OPTIONAL_FIELDS = ("node_id", "gas_raw_adc", "pressure_hpa", "flame_detected")
 
@@ -106,28 +103,21 @@ DEFAULT_ENVIRONMENT = "Kitchen"
 
 # ---------------------------------------------------------------------------
 # FUSION WEIGHTS
-# No IR flame sensor in this build, so the optical (webcam) channel carries the
-# ignition-confirmation weight the flame sensor would have held.
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# IS THE IR FLAME SENSOR WIRED? Flip this to True once it is.
-# Nothing else needs changing - the contract already carries the field.
-# ---------------------------------------------------------------------------
+# IS THE IR FLAME SENSOR WIRED? Flip this to False if it is ever removed.
+# Nothing else needs changing - the contract already carries the field, and the
+# software falls back to chemical + thermal on its own.
 FLAME_SENSOR_PRESENT = True
 
 WEIGHTS = {
-    "gas": 0.35,        # chemical modality (MQ2)   - always-present channel
-    "temp": 0.25,       # thermal modality (BME280) - always-present channel
-    "visual": 0.40,     # IGNITION channel weight. Both the IR flame sensor and
-                        # the webcam feed this. It is an escalator, not a fixed
-                        # weight: no flame seen is NOT evidence of safety (the
-                        # source may be out of the camera's/sensor's view), so
-                        # the ignition channel can only raise the score.
+    "gas": 0.35,        # chemical modality (MQ2)    - always-present channel
+    "temp": 0.25,       # thermal modality (BME280)  - always-present channel
+    "ignition": 0.40,   # IGNITION channel (IR flame sensor). An escalator, not
+                        # a fixed weight: no flame seen is NOT evidence of
+                        # safety (the source may be outside the sensor's cone),
+                        # so this channel can only ever raise the score.
 }
-# When both ignition sources agree the evidence is stronger than either alone.
-IGNITION_BOTH_AGREE = 100.0   # IR + optical both firing -> full confirmation
-IGNITION_IR_ONLY = 92.0       # IR alone: a real physical measurement, trusted
-IGNITION_DISAGREE_DAMP = 0.75 # one fires, the other is available and quiet
+IGNITION_IR_ONLY = 92.0       # a confirmed IR flame: a real physical measurement
 # A confirmed flame is a direct physical measurement, not a statistical
 # inference, so it hard-escalates rather than merely contributing weight.
 IGNITION_FLOOR_WARNING = 50.0   # trusted ignition -> at least WARNING
@@ -235,16 +225,6 @@ RATE_MIN_WINDOW_FRACTION = 0.5     # of SLOPE_WINDOW_S
 COUNTDOWN_MIN_SLOPE = 0.25         # risk-points per second
 COUNTDOWN_MIN_SCORE = 36.0         # only once the situation is actually developing
 COUNTDOWN_MAX_HORIZON_S = 900.0
-
-# ---------------------------------------------------------------------------
-# VISION (webcam HSV fire-colour detection)
-# Re-tune these in the actual demo room: python auto_tune_vision.py --write
-# ---------------------------------------------------------------------------
-HSV_LOWER = (0, 100, 150)
-HSV_UPPER = (35, 255, 255)
-FIRE_PIXEL_RATIO_TRIGGER = 0.02      # 2 % of frame
-VISION_CONFIDENCE_FULL_SCALE = 0.10  # 10 % of frame == confidence 100
-CAMERA_INDEX = 0
 
 # ---------------------------------------------------------------------------
 # SENSOR SANITY (self-diagnostic + fault detection)

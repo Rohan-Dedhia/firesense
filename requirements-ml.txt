@@ -1,0 +1,16 @@
+# Local-only extras for the camera and the ML work.
+# NOT installed on Streamlit Cloud - keep these out of requirements.txt or the
+# hosted build breaks (see STREAMLIT_HOSTING.md).
+#
+#   python -m pip install -r requirements-ml.txt
+
+opencv-python>=4.8       # camera capture, JPEG decode
+scikit-learn>=1.3        # the fusion model in train.py
+joblib>=1.3              # saving the trained model
+
+# vision channel - a pretrained fire/smoke detector, no training needed.
+# Get weights from roboflow.com/universe and put them in models/
+ultralytics>=8.3
+
+# added in later phases, uncomment when you get there:
+# timm                   # MaxViT and other vision backbones

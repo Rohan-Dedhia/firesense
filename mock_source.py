@@ -24,8 +24,8 @@ SCENARIOS = {
                               "A threshold detector alarms; fusion should suppress.",
     "gradual_leak": "Gas rises steadily, humidity flat/falling. No flame. "
                     "Fusion should escalate well before the naive threshold.",
-    "sudden_fire": "Fast gas + temperature rise, humidity drops, flame colour "
-                   "visible. Everything agrees -> CRITICAL, high confidence.",
+    "sudden_fire": "Fast gas + temperature rise, humidity drops, IR flame "
+                   "sensor fires. Everything agrees -> CRITICAL, high confidence.",
     "sensor_fault": "BME280 returns garbage while MQ2 looks normal - exercises "
                     "the sanity check and disagreement flag.",
 }
@@ -84,7 +84,7 @@ class MockNode:
             gas = 90 + ramp * 14.0 + j(15)
             temp = 26 + ramp * 0.85 + j(0.3)
             hum = 55 - ramp * 0.45 + j(0.4)
-            flame = s >= 6            # visual channel picks it up shortly after
+            flame = s >= 6            # IR sensor sees it shortly after ignition
 
         elif self.scenario == "sensor_fault":
             gas = 95 + j(8)
@@ -103,8 +103,8 @@ class MockNode:
             # config.FLAME_SENSOR_PRESENT is set.
             "flame_detected": bool(flame),
         }
-        # visual truth travels beside the payload, not inside it: the webcam is
-        # a laptop-side channel, so the dashboard merges it at scoring time.
+        # second element retained so every source shares one read() shape;
+        # ignition now travels inside the payload as flame_detected.
         return reading, flame
 
 
@@ -120,4 +120,4 @@ if __name__ == "__main__":
     print(f"--- {name}: {SCENARIOS[name]}")
     for i, (r, flame) in enumerate(stream(name, 12)):
         print(f"{i:3d} gas={r['gas_ppm']:7.1f} T={r['temp_c']:6.2f} "
-              f"RH={r['humidity_pct']:6.2f} visual_flame={flame}")
+              f"RH={r['humidity_pct']:6.2f} flame={flame}")

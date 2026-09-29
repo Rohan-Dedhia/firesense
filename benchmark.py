@@ -30,10 +30,8 @@ def run_scenario(scenario, env="Kitchen", n=150, seed=7):
     node = MockNode(scenario, seed=seed)
     rows, naive_t, fusion_t = [], None, None
     for i in range(n):
-        r, flame = node.next()
-        res = eng.update(r, visual_fire=flame,
-                         visual_confidence=88.0 if flame else 0.0,
-                         now=t0 + i)
+        r, _ = node.next()
+        res = eng.update(r, now=t0 + i)
         rows.append(res)
         if naive_t is None and r["gas_ppm"] >= C.NAIVE_GAS_THRESHOLD_PPM:
             naive_t = i

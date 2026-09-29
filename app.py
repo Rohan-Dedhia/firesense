@@ -1,13 +1,13 @@
 """
 FireSense - live multi-sensor fusion dashboard.
 
-Run locally (full hardware: USB serial + webcam):
+Run locally (with the node on USB):
     streamlit run app.py
 
-Hosted on Streamlit Community Cloud the server has no COM port and no camera,
-so those two channels detect their own absence and step aside; Test Mode and
-Replay still work, which is what a shared link is good for. The live hardware
-demo must be run locally.
+Hosted on Streamlit Community Cloud the server has no COM port, so the serial
+channel reports its own absence and steps aside; Test Mode and Replay still
+work, which is what a shared link is good for. The live hardware demo must be
+run locally.
 
 UI notes
 --------
@@ -29,13 +29,6 @@ import config as C
 import fusion
 import ingest
 from mock_source import SCENARIOS
-
-# --- optional channel: the camera needs OpenCV, which a headless host may lack
-try:
-    import vision
-    VISION_IMPORTED, VISION_ERROR = True, ""
-except Exception as _exc:                                   # pragma: no cover
-    vision, VISION_IMPORTED, VISION_ERROR = None, False, str(_exc)
 
 _HAS_FRAGMENT = hasattr(st, "fragment")
 
@@ -132,8 +125,6 @@ def init_state() -> None:
     ss.setdefault("source_kind", "mock")
     ss.setdefault("scenario", "normal")
     ss.setdefault("alerts", alerts.AlertManager())
-    ss.setdefault("vision", None)
-    ss.setdefault("show_cam", True)
     ss.setdefault("running", True)
     ss.setdefault("logging", False)
     ss.setdefault("rows", [])
@@ -303,27 +294,6 @@ with st.sidebar:
 
     st.divider()
 
-    # -- optical channel ---------------------------------------------------
-    if VISION_IMPORTED:
-        cam_on = st.toggle("Optical channel (webcam)", value=ss.vision is not None)
-        if cam_on and ss.vision is None:
-            v = vision.VisionChannel()
-            ss.vision = v if v.start() else None
-            if ss.vision is None:
-                st.error("Camera unavailable — check the index in config.py, "
-                         "permissions, or whether another app holds it. "
-                         "A hosted server has no camera at all.")
-        elif not cam_on and ss.vision is not None:
-            ss.vision.stop()
-            ss.vision = None
-        ss.show_cam = st.checkbox("Show camera preview", value=ss.show_cam,
-                                  disabled=ss.vision is None)
-    else:
-        st.caption(f"Optical channel unavailable (OpenCV not importable). "
-                   f"Chemical + thermal + IR still run.")
-
-    st.divider()
-
     ss.running = st.toggle("Live", value=ss.running,
                            help="Pause to freeze the screen while you explain it.")
     ss.logging = st.toggle("Log to CSV", value=ss.logging)
@@ -373,13 +343,8 @@ def channel_bar(name: str, reading: str, score: float, weight: str,
 
 
 def read_once():
-    """One sample: source -> optional camera -> fusion -> alerts -> history."""
-    reading, flame_hint = ss.source.read()
-
-    vis_res = vision.VisualResult(available=False) if VISION_IMPORTED else None
-    frame = None
-    if ss.vision is not None:
-        vis_res, frame = ss.vision.poll(want_frame=ss.show_cam)
+    """One sample: source -> fusion -> alerts -> history."""
+    reading, _ = ss.source.read()
 
     problem = None
     if reading:
@@ -387,18 +352,7 @@ def read_once():
         if problems:
             problem = "Contract violation from the node: " + "; ".join(problems)
         else:
-            if ss.vision is not None and vis_res is not None and vis_res.available:
-                v_fire, v_conf, v_avail = vis_res.fire_detected, vis_res.confidence, True
-            elif flame_hint is not None:
-                # Test Mode with no camera: the scenario supplies optical truth.
-                v_fire = bool(flame_hint)
-                v_conf, v_avail = (88.0 if flame_hint else 0.0), True
-            else:
-                v_fire, v_conf, v_avail = False, 0.0, False
-
-            res = ss.engine.update(reading, visual_fire=v_fire,
-                                   visual_confidence=v_conf,
-                                   visual_available=v_avail)
+            res = ss.engine.update(reading)
             ss.last_result = res
             ss.rows.append({
                 "time": pd.Timestamp.fromtimestamp(res.ts),
@@ -416,10 +370,10 @@ def read_once():
                 except Exception as exc:
                     problem = f"Could not write the CSV log: {exc}"
 
-    return ss.last_result, vis_res, frame, problem
+    return ss.last_result, problem
 
 
-def render(res, vis_res, frame, problem) -> None:
+def render(res, problem) -> None:
     if problem:
         st.error(problem)
 
@@ -500,24 +454,17 @@ def render(res, vis_res, frame, problem) -> None:
         st.markdown("#### Why this score")
 
         flame_read = ("TRIGGERED" if res.flame_sensor else "clear") \
-            if res.flame_available else "not fitted"
-        optical_read = ("flame colour" if res.visual_fire else "no flame colour") \
-            if (ss.vision is not None or ss.source_kind == "mock") else "channel off"
+            if res.flame_available else "not reporting"
 
         st.markdown(
             channel_bar("Chemical · MQ2", f"{res.gas_compensated:.0f} ppm",
                         res.gas_score, f"weight {C.WEIGHTS['gas']:.2f}")
             + channel_bar("Thermal · BME280", f"{res.temp_c:.1f} °C",
                           res.temp_score, f"weight {C.WEIGHTS['temp']:.2f}")
-            + channel_bar("Optical · camera", optical_read, res.visual_score,
-                          "ignition evidence",
-                          available=(ss.vision is not None or ss.source_kind == "mock"))
-            + channel_bar("IR flame sensor", flame_read,
-                          100.0 if res.flame_sensor else 0.0, "ignition evidence",
-                          available=res.flame_available)
-            + channel_bar("Ignition · fused",
-                          "confirmed" if res.ignition_score else "none",
-                          res.ignition_score, f"weight {C.WEIGHTS['visual']:.2f}"),
+            + channel_bar("Ignition · IR flame sensor", flame_read,
+                          res.ignition_score,
+                          f"weight {C.WEIGHTS['ignition']:.2f} · escalator only",
+                          available=res.flame_available),
             unsafe_allow_html=True,
         )
 
@@ -558,13 +505,6 @@ def render(res, vis_res, frame, problem) -> None:
         elif res.naive_alarm and res.level == "NORMAL":
             st.success("The fixed threshold is false-alarming; fusion is "
                        "correctly quiet.")
-
-        if ss.show_cam and frame is not None:
-            st.markdown("#### Optical channel")
-            st.image(frame[:, :, ::-1], channels="RGB",
-                     use_container_width=True)
-            if vis_res is not None:
-                st.caption(vis_res.note)
 
         st.markdown("#### Event log")
         if ss.engine.events:
@@ -611,8 +551,8 @@ if _HAS_FRAGMENT:
 
     @st.fragment(run_every=_INTERVAL if ss.running else None)
     def live_panel() -> None:
-        res, vis_res, frame, problem = read_once()
-        render(res, vis_res, frame, problem)
+        res, problem = read_once()
+        render(res, problem)
 
         # re-arm the fragment when the sampling regime changes
         want = "fast" if (res and res.level != "NORMAL") else "slow"
@@ -626,8 +566,8 @@ if _HAS_FRAGMENT:
     live_panel()
 
 else:                                                   # Streamlit < 1.37
-    res, vis_res, frame, problem = read_once()
-    render(res, vis_res, frame, problem)
+    res, problem = read_once()
+    render(res, problem)
     if ss.running:
         time.sleep(_INTERVAL)
         st.rerun()

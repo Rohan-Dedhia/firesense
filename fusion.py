@@ -302,7 +302,7 @@ def classify_signature(sl: Slopes, ignition: bool) -> tuple[str, str]:
       gas leak         -> gas UP while humidity is flat or FALLING (escaping LPG
                           displaces room air; no water vapour is produced)
       fire             -> gas UP, temperature UP fast, humidity DOWN, and the
-                          optical channel confirms flame colour
+                          IR flame sensor confirms ignition
 
     Returns (label, human-readable reason).
     """
@@ -338,14 +338,11 @@ class RiskResult:
     gas_compensated: float = 0.0
     temp_c: float = 0.0
     humidity_pct: float = 0.0
-    visual_fire: bool = False
-    visual_confidence: float = 0.0
     flame_sensor: bool = False
     flame_available: bool = False
     # sub-scores
     gas_score: float = 0.0
     temp_score: float = 0.0
-    visual_score: float = 0.0
     ignition_score: float = 0.0
     # outputs
     score_raw: float = 0.0
@@ -495,8 +492,8 @@ class FusionEngine:
     @staticmethod
     def _confidence(sub_scores: list[float], ignition_available: bool) -> float:
         """
-        Cross-modality agreement. Three independent physics (chemical, thermal,
-        optical) pointing the same way = high confidence. One channel shouting
+        Cross-modality agreement. Independent physics (chemical, thermal,
+        infrared) pointing the same way = high confidence. One channel shouting
         while the others are calm = low confidence, flag for human verification.
         """
         n = len(sub_scores)
@@ -514,9 +511,6 @@ class FusionEngine:
     def update(
         self,
         reading: dict,
-        visual_fire: bool = False,
-        visual_confidence: float = 0.0,
-        visual_available: bool = True,
         now: Optional[float] = None,
     ) -> RiskResult:
         now = now if now is not None else time.time()
@@ -535,7 +529,7 @@ class FusionEngine:
         # ---- calibration (feature A) ------------------------------------
         # Only learn from quiet readings; never absorb an event into "normal".
         if not self.calibrator.done:
-            if not visual_fire and self.calibrator.should_observe(gas_c):
+            if self.calibrator.should_observe(gas_c):
                 self.calibrator.observe(gas_c, temp, hum, now=now)
             self.calibrator.tick(now)      # clock advances regardless
         profile = self.calibrator.profile()
@@ -556,51 +550,38 @@ class FusionEngine:
         gas_score = _clamp(gas_level_score + rate_bonus)
         temp_score = normalize(temp, profile["temp_normal_max"],
                                profile["temp_critical"])
-        visual_score = _clamp(visual_confidence) if visual_fire else 0.0
 
-        # ---- ignition channel: IR flame sensor + optical, fused ----------
-        # Two physically independent ways of seeing the same thing: the IR
-        # sensor measures a flame's infrared emission, the camera measures its
-        # colour. Agreement is stronger evidence than either alone; a lone
-        # optical hit is damped, because warm light is its known failure mode.
+        # ---- ignition channel: IR flame sensor ---------------------------
+        # The IR sensor measures a flame's infrared emission directly. That is
+        # a physical measurement rather than an inference from colour, so it is
+        # trusted on its own - but only after a debounce, because a single
+        # isolated positive is far more likely to be a glitch or a reflection
+        # than a fire, and ignition hard-escalates the score.
         flame_available = C.FLAME_SENSOR_PRESENT and ("flame_detected" in reading)
         flame_raw = bool(reading.get("flame_detected", False)) and flame_available
-        # debounce: one isolated positive is a glitch, not a fire
         self._flame_streak = self._flame_streak + 1 if flame_raw else 0
         flame_sensor = self._flame_streak >= C.FLAME_CONFIRM_SAMPLES
 
-        if flame_sensor and visual_fire:
-            ignition_score = C.IGNITION_BOTH_AGREE
-        elif flame_sensor:
-            ignition_score = (C.IGNITION_IR_ONLY * C.IGNITION_DISAGREE_DAMP
-                              if visual_available else C.IGNITION_IR_ONLY)
-        elif visual_fire:
-            ignition_score = (visual_score * C.IGNITION_DISAGREE_DAMP
-                              if flame_available else visual_score)
-        else:
-            ignition_score = 0.0
+        ignition_score = C.IGNITION_IR_ONLY if flame_sensor else 0.0
         ignition = ignition_score > 0.0
-        ignition_available = visual_available or flame_available
+        ignition_available = flame_available
 
         # Chemical + thermal, renormalised over the two channels that are always
-        # present. The optical channel is an ESCALATOR, not a fixed-weight input:
-        # seeing no flame colour is not evidence of safety (the source may be out
-        # of frame), so it can only ever raise the score, never dilute it.
+        # present. The ignition channel is an ESCALATOR, not a fixed-weight
+        # input: seeing no flame is not evidence of safety (the source may be
+        # outside the sensor's cone), so it can only ever raise the score,
+        # never dilute it.
         wg, wt = C.WEIGHTS["gas"], C.WEIGHTS["temp"]
         chem_thermal = (wg * gas_score + wt * temp_score) / (wg + wt)
         if ignition:
-            wv = C.WEIGHTS["visual"]
-            score_raw = (1.0 - wv) * chem_thermal + wv * ignition_score
-            # "Trusted" ignition = the IR sensor fired (a direct physical
-            # measurement), or the camera fired and there is no IR sensor to
-            # cross-check it against. A lone camera hit while an IR sensor sits
-            # quiet is NOT trusted - warm light is its known failure mode.
-            trusted = flame_sensor or (
-                visual_fire and not flame_available and visual_score >= 60.0)
-            if trusted:
-                score_raw = max(score_raw, C.IGNITION_FLOOR_WARNING)
-                if chem_thermal >= C.IGNITION_CRITICAL_CHEM_MIN:
-                    score_raw = max(score_raw, C.IGNITION_FLOOR_CRITICAL)
+            wi = C.WEIGHTS["ignition"]
+            score_raw = (1.0 - wi) * chem_thermal + wi * ignition_score
+            # A confirmed flame is a direct physical measurement, not a
+            # statistical inference, so it hard-escalates rather than merely
+            # contributing weight.
+            score_raw = max(score_raw, C.IGNITION_FLOOR_WARNING)
+            if chem_thermal >= C.IGNITION_CRITICAL_CHEM_MIN:
+                score_raw = max(score_raw, C.IGNITION_FLOOR_CRITICAL)
         else:
             score_raw = chem_thermal
 
@@ -697,35 +678,22 @@ class FusionEngine:
         confidence = self._confidence(subs, ignition_available)
 
         if ignition and gas_score < 30 and temp_score < 30:
-            if flame_sensor and visual_fire:
-                flags.append(
-                    "Both ignition channels report flame while gas and temperature "
-                    "are still normal - very early ignition, or a heat/light source "
-                    "in view. Verify.")
-            elif visual_fire and not flame_sensor:
-                flags.append(
-                    "Optical channel reports flame but chemical and thermal channels "
-                    "are quiet - possible false colour match (warm light / reflection).")
-            else:
-                flags.append(
-                    "IR flame sensor triggered with no chemical or thermal rise yet.")
+            flags.append(
+                "IR flame sensor triggered while gas and temperature are still "
+                "normal - very early ignition, or a heat source in the sensor's "
+                "cone. Verify.")
         if flame_raw and not flame_sensor:
             flags.append(
-                "Single isolated flame reading from the IR sensor - treated as "
-                "noise until a second consecutive sample confirms it.")
-        if flame_available and visual_available and (flame_sensor != visual_fire):
-            flags.append(
-                f"Ignition channels disagree: IR sensor "
-                f"{'YES' if flame_sensor else 'no'}, camera "
-                f"{'YES' if visual_fire else 'no'}. One of them may not be "
-                f"pointed at the source.")
+                f"Single isolated flame reading from the IR sensor - treated as "
+                f"noise until {C.FLAME_CONFIRM_SAMPLES} consecutive samples "
+                f"confirm it.")
         if (gas_score > 60 or temp_score > 60) and not ignition and ignition_available:
             flags.append(
                 "Chemical/thermal anomaly without ignition confirmation - the "
                 "source may be outside the sensor's line of sight. Verify manually.")
         if not ignition_available:
-            flags.append("No ignition channel available (camera off, no flame "
-                         "sensor) - running on chemical + thermal only.")
+            flags.append("No ignition channel available (no flame sensor "
+                         "reported) - running on chemical + thermal only.")
 
         self.score_history.append((now, score))
 
@@ -758,10 +726,8 @@ class FusionEngine:
             ts=now, environment=self.environment,
             gas_raw=round(gas_raw, 1), gas_compensated=round(gas_c, 1),
             temp_c=round(temp, 2), humidity_pct=round(hum, 2),
-            visual_fire=visual_fire, visual_confidence=round(visual_confidence, 1),
             flame_sensor=flame_sensor, flame_available=flame_available,
             gas_score=round(gas_score, 1), temp_score=round(temp_score, 1),
-            visual_score=round(visual_score, 1),
             ignition_score=round(ignition_score, 1),
             score_raw=round(score_raw, 1), score=score, level=level,
             confidence=confidence, signature=signature, signature_reason=reason,
@@ -790,11 +756,9 @@ def _band_word(sub: float) -> str:
 
 
 def _ignition_words(r: RiskResult) -> str:
-    parts = []
-    if r.flame_available:
-        parts.append("IR flame sensor: " + ("TRIGGERED" if r.flame_sensor else "clear"))
-    parts.append("flame colour: " + ("detected" if r.visual_fire else "none"))
-    return ", ".join(parts)
+    if not r.flame_available:
+        return "IR flame sensor: not reporting"
+    return "IR flame sensor: " + ("TRIGGERED" if r.flame_sensor else "clear")
 
 
 def explain(r: RiskResult) -> str:
