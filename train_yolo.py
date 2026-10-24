@@ -83,10 +83,12 @@ def train(device: str) -> int:
     return validate(device)
 
 
-def validate(device: str) -> int:
+def validate(device: str, out: Path = OUT, hyper: dict | None = None) -> int:
+    """Image-level validation of out/weights/best.pt; `hyper` overrides the
+    recorded hyperparameters (train_yolo_v2.py uses a different schedule)."""
     from ultralytics import YOLO
 
-    model = YOLO(str(OUT / "weights" / "best.pt"))
+    model = YOLO(str(out / "weights" / "best.pt"))
     split = json.loads((Path("models") / "maxvit_dfire" / "split.json").read_text())
     names = sorted(split["val_names"])
     paths = [T.DATA / "extracted" / "train" / "images" / n for n in names]
@@ -95,15 +97,16 @@ def validate(device: str) -> int:
     thr = {o: T.best_f1_threshold(y[:, k], p[:, k]) for k, o in enumerate(T.OUTPUTS)}
     m = T.image_metrics(y, p, thr)
     T.print_metrics("YOLO VALIDATION, image level (thresholds chosen here)", m)
-    np.save(OUT / "val_scores.npy", p)
-    (OUT / "val_results.json").write_text(json.dumps(
-        {"thresholds": thr, "metrics": m,
-         "hyperparameters": {"model": "yolov8n.pt (COCO-pretrained)", "imgsz": IMGSZ,
-                             "batch": BATCH, "time_cap_hours": TIME_CAP_H,
-                             "epochs_requested": 100, "patience": 10,
-                             "optimizer": "ultralytics default (auto)",
-                             "image_score": "max box confidence per class",
-                             "box_conf_floor": SCORE_CONF}}, indent=1))
+    np.save(out / "val_scores.npy", p)
+    hp = {"model": "yolov8n.pt (COCO-pretrained)", "imgsz": IMGSZ,
+          "batch": BATCH, "time_cap_hours": TIME_CAP_H,
+          "epochs_requested": 100, "patience": 10,
+          "optimizer": "ultralytics default (auto)",
+          "image_score": "max box confidence per class",
+          "box_conf_floor": SCORE_CONF}
+    hp.update(hyper or {})
+    (out / "val_results.json").write_text(json.dumps(
+        {"thresholds": thr, "metrics": m, "hyperparameters": hp}, indent=1))
     return 0
 
 

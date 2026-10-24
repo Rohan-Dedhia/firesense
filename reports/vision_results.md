@@ -213,3 +213,48 @@ fire only [2, 64, 4, 29], smoke only [61, 0, 623, 17], both [6, 18, 21, 494].
   val_results.json, test_results.json, curves.png}`,
   `models/yolo_dfire/{weights/best.pt, results.csv, val_results.json,
   test_results.json}`.
+
+## 6. YOLOv8n run 2: continued training (validation only, 2026-10-24)
+
+`train_yolo_v2.py` starts a **new** run from run 1's `models/yolo_dfire/weights/last.pt`
+and writes to `models/yolo_dfire_v2`. Run 1's folder was not written to.
+It uses the same grouped train/validation split, the same image-level scoring
+and the same threshold rule. Ultralytics restarts the warm-up and schedule. With
+15 epochs requested, its "auto" optimiser picked **AdamW, lr 0.00167**, not run
+1's MuSGD (lr 0.01), so the two runs differ in more than length.
+An epoch guard (stop if an epoch passes 20 min, watchdog kill at 25 min) was on
+throughout and never triggered.
+
+**The test split was not used.** It was already used once for YOLO
+(section 3, run 1). Run 2 has no test pass, and the guard in `train_yolo.py`
+that refuses a second test run is unchanged. The run-2 numbers below are
+validation numbers, and validation also chose its thresholds, so they are
+optimistic in the same way as the validation rows in section 3.
+
+Per-epoch wall time, including validation (`models/yolo_dfire_v2/epoch_times.csv`):
+
+| epoch | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| minutes | 7.8 | 10.0 | 11.2 | 12.1 | 12.5 | 12.5 | 12.6 | 11.4 | 11.0 | 12.0 | 10.7 | 12.1 | 7.7 | 7.6 | 7.3 |
+| box mAP50 | .493 | .470 | .480 | .519 | .544 | .570 | .568 | .594 | .603 | .623 | .633 | .651 | .646 | .662 | .666 |
+
+Total 2.64 h. Box mAP50 rose from 0.421 (end of run 1) to 0.666 and was still
+rising slowly at epoch 15. The epoch-6 stall from run 1 did not recur.
+
+### Validation, image level (2,584 images, thresholds chosen on validation)
+
+| | thresholds fire / smoke | fire P / R | fire AP | smoke P / R | smoke AP | false alarms on neither | fire output alone | hazard detected |
+|---|---|---|---:|---|---:|---:|---:|---:|
+| MaxViT-tiny | 0.36 / 0.88 | 0.971 / 0.948 | 0.983 | 0.917 / 0.931 | 0.968 | 72/1,245 = **5.8%** | 0.1% | 94.8% |
+| YOLOv8n run 2 (6 + 15 epochs) | 0.20 / 0.16 | 0.922 / 0.926 | 0.964 | 0.894 / 0.894 | 0.946 | 100/1,245 = **8.0%** | 2.2% | 91.4% |
+| YOLOv8n run 1 (6 epochs) | 0.12 / 0.14 | 0.894 / 0.856 | 0.927 | 0.683 / 0.798 | 0.778 | 413/1,245 = 33.2% | 3.9% | 82.0% |
+
+YOLO run-2 validation confusion (rows true; columns neither / fire only /
+smoke only / both): neither [1145, 13, 72, 15], fire only [7, 47, 5, 40],
+smoke only [103, 0, 576, 22], both [5, 24, 30, 480].
+
+Reading: run 2 closes most of the gap. MaxViT is still ahead on every
+validation metric, most clearly on fire calls in images with neither fire nor
+smoke (0.1% vs 2.2%). For FireSense that fire-output figure matters most. There
+is no run-2 test figure, so the test comparison in section 3 still uses run 1
+and understates YOLO. Neither model has been checked on the deployment room.
