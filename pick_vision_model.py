@@ -62,14 +62,25 @@ def capture(case: str, n: int, camera_spec: str, delay: float) -> int:
         return 1
 
     out = CHECK_DIR / case
-    out.mkdir(parents=True, exist_ok=True)
-    for old in out.glob("*.jpg"):
-        old.unlink()
 
+    # Prove the camera works BEFORE touching the old frames: open it and read
+    # one frame. A camera that is unplugged, off WiFi or busy must leave the
+    # previous capture exactly as it was, not an empty folder.
     cam = cam_mod.make_camera(camera_spec)
     if not cam.open():
         print(f"camera unavailable: {getattr(cam, 'error', '?')}")
+        print(f"  existing frames in {out} were left untouched")
         return 1
+    probe = cam.read()
+    if not probe.ok:
+        cam.close()
+        print(f"camera opened but the first frame failed: {probe.error}")
+        print(f"  existing frames in {out} were left untouched")
+        return 1
+
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob("*.jpg"):
+        old.unlink()
 
     print()
     if case == "normal":

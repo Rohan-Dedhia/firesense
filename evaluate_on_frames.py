@@ -3,6 +3,8 @@ FireSense - check a trained vision model on frames from the deployment camera.
 
     python evaluate_on_frames.py --model models/maxvit_dfire/best.pt
     python evaluate_on_frames.py --model models/yolo_dfire/weights/best.pt
+    python evaluate_on_frames.py --model models/maxvit_dfire/best.pt \
+        --frames-dir data/vision_check_phone/candle      # phone footage
 
 Reads the same folders as pick_vision_model.py:
 
@@ -10,6 +12,12 @@ Reads the same folders as pick_vision_model.py:
     data/vision_check/flame/*.jpg     the same room, a lit flame in frame
 
 (capture them with `python pick_vision_model.py --capture normal|flame`).
+
+--frames-dir (or --dir) points it at any other folder with the same
+normal/ and flame/ layout - for example frames from a phone video, made with
+extract_frames.py and sorted by hand. The output is identical, plus a warning:
+phone footage is not ESP32-CAM footage, so those numbers are a preview and do
+not replace the check on data/vision_check.
 
 Prints the false-alarm rate on `normal` and the detection rate on `flame`:
 first at the thresholds chosen on D-Fire validation (what the model would
@@ -33,6 +41,12 @@ import numpy as np
 CHECK_DIR = Path("data") / "vision_check"
 CASES = ("normal", "flame")
 SWEEP = (0.25, 0.35, 0.45, 0.55, 0.65, 0.75)
+NOT_ESP32_WARNING = (
+    "  WARNING: these frames are not from data/vision_check. If they are phone\n"
+    "  or other recorded footage, they are NOT ESP32-CAM footage (different\n"
+    "  sensor, lens, colour and JPEG encoder). Read the numbers below as a\n"
+    "  preview; they do not replace the check on the deployment camera\n"
+    "  (CLAUDE.md rule 10).")
 OUTPUTS = ("fire", "smoke")
 
 
@@ -104,6 +118,14 @@ def _validated_thresholds(path: Path) -> dict | None:
     return None
 
 
+def is_check_dir(path: Path) -> bool:
+    """True for data/vision_check itself - the deployment-camera folder."""
+    try:
+        return Path(path).resolve() == CHECK_DIR.resolve()
+    except OSError:
+        return False
+
+
 def make_scorer(path: Path, device: str):
     import torch
 
@@ -119,16 +141,27 @@ def make_scorer(path: Path, device: str):
 # ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------
-def evaluate(model_path: str, check_dir: Path, device: str) -> int:
+def evaluate(model_path: str, check_dir: Path, device: str, scorer=None) -> int:
+    """`scorer` is for tests: anything with .score(paths) and .thresholds."""
+    check_dir = Path(check_dir)
+    deployment = is_check_dir(check_dir)
+    if not deployment:
+        print()
+        print(NOT_ESP32_WARNING)
+
     frames = {c: sorted((check_dir / c).glob("*.jpg")) for c in CASES}
     missing = [c for c in CASES if not frames[c]]
     if missing:
         print(f"\n  no frames for: {', '.join(missing)} (looked in {check_dir})")
         for c in missing:
-            print(f"    python pick_vision_model.py --capture {c}")
+            if deployment:
+                print(f"    python pick_vision_model.py --capture {c}")
+            else:
+                print(f"    put the {c} frames in {check_dir / c}/  "
+                      f"(extract_frames.py output, sorted by hand)")
         return 1
 
-    scorer = make_scorer(Path(model_path), device)
+    scorer = scorer or make_scorer(Path(model_path), device)
     s = {c: scorer.score(frames[c]) for c in CASES}
     n_norm, n_flame = len(frames["normal"]), len(frames["flame"])
 
@@ -136,6 +169,8 @@ def evaluate(model_path: str, check_dir: Path, device: str) -> int:
     print("=" * 72)
     print(f"  {model_path}")
     print(f"  {n_norm} normal frames, {n_flame} flame frames from {check_dir}")
+    if not deployment:
+        print("  (not the ESP32-CAM check folder - see the warning above)")
     print("=" * 72)
 
     thr = scorer.thresholds
@@ -201,15 +236,19 @@ def evaluate(model_path: str, check_dir: Path, device: str) -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", required=True, help="MaxViT best.pt or YOLO .pt")
-    p.add_argument("--dir", default=str(CHECK_DIR),
+    p.add_argument("--frames-dir", "--dir", dest="frames_dir", default=str(CHECK_DIR),
                    help="folder holding normal/ and flame/ (default data/vision_check)")
     p.add_argument("--device", default="mps")
-    a = p.parse_args()
-    return evaluate(a.model, Path(a.dir), a.device)
+    return p
+
+
+def main() -> int:
+    a = build_parser().parse_args()
+    return evaluate(a.model, Path(a.frames_dir), a.device)
 
 
 if __name__ == "__main__":

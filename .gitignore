@@ -9,6 +9,10 @@ data/alerts/
 data/feedback.csv
 data/.telegram_offset
 
+# frames extracted from phone videos of the room (extract_frames.py) -
+# photos of a private home, never committed
+data/vision_check_phone/
+
 # trained model weights - too big for git, and rebuildable
 *.pt
 *.pth
