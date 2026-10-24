@@ -5,13 +5,14 @@ Everything else in this project is a component. This is the thing that runs:
 
     sensors ──┐
               ├──► rule engine ──┐
-    camera ───┼──► YOLO ─────────┼──► decision ──► alert + photo + buttons
+    camera ───┼──► YOLO/MaxViT ──┼──► decision ──► alert + photo + buttons
               └──► VLM ──────────┘                      │
                   (on escalation only)                  └──► CSV log
 
     python pipeline.py --source mock --scenario sudden_fire
     python pipeline.py --source serial --camera webcam
     python pipeline.py --source serial --camera 192.168.1.42 --vlm
+    python pipeline.py --source serial --camera webcam --vision maxvit --alert-boxes
 
 Why the rule engine is still here
 ---------------------------------
@@ -28,6 +29,12 @@ level, never lower it. A model that scores 0 has seen no fire, which is not
 the same as there being none - and on this project's own webcam, a community
 fire model reported fire on an empty room for twenty consecutive frames. That
 is the argument for the rule, made by measurement rather than assertion.
+
+The vision channel is either the YOLO detector (vision_ml, default) or the
+MaxViT-tiny classifier trained on D-Fire (vision_maxvit, `--vision maxvit`).
+Both feed combine() through the same VisionResult, so the escalator rule and
+the VISION_ALONE_MAX cap apply to either. `--alert-boxes` adds YOLO v2 boxes
+to the alert photo for the person reading it; the boxes are not scored.
 
 The VLM runs only on escalation. It takes seconds; calling it every second
 would make the system slower than the fire.
@@ -60,6 +67,12 @@ except Exception:                                           # pragma: no cover
     vision_ml, HAVE_VISION = None, False
 
 try:
+    import vision_maxvit
+    HAVE_MAXVIT = True
+except Exception:                                           # pragma: no cover
+    vision_maxvit, HAVE_MAXVIT = None, False
+
+try:
     import vlm as vlm_mod
     HAVE_VLM = True
 except Exception:                                           # pragma: no cover
@@ -79,6 +92,10 @@ except Exception:                                           # pragma: no cover
 VISION_ALONE_MAX = 60.0
 VISION_WEIGHT = 0.40                  # matches the ignition weight in config
 VLM_ESCALATION_LEVELS = ("WARNING", "CRITICAL")
+VISION_KINDS = ("yolo", "maxvit")
+DEFAULT_WEIGHTS = {"yolo": "models/fire_yolo.pt",
+                   "maxvit": "models/maxvit_dfire/best.pt"}
+DEFAULT_BOX_WEIGHTS = "models/yolo_dfire_v2/weights/best.pt"
 
 
 @dataclass
@@ -151,12 +168,16 @@ def combine(engine_score: float, engine_level: str, vision_score: float,
 
 class FireSensePipeline:
     def __init__(self, source, camera_spec: Optional[str] = None,
-                 weights: str = "models/fire_yolo.pt",
+                 weights: Optional[str] = None,
                  use_vlm: bool = False, vlm_model: str = "moondream",
                  environment: str = C.DEFAULT_ENVIRONMENT,
                  vision_every: int = 2, log_csv: bool = True,
-                 send_alerts: bool = True):
+                 send_alerts: bool = True, vision: str = "yolo",
+                 box_weights: Optional[str] = None):
+        if vision not in VISION_KINDS:
+            raise ValueError(f"vision must be one of {VISION_KINDS}, not {vision!r}")
         self.source = source
+        self.vision_kind = vision
         self.engine = fusion.FusionEngine(environment)
         self.log_csv = log_csv
         self.send_alerts = send_alerts
@@ -176,14 +197,34 @@ class FireSensePipeline:
                     f"camera unavailable ({getattr(cam, 'error', '?')}) - "
                     f"running without the visual channels")
 
-        # -- YOLO ---------------------------------------------------------
+        # -- vision: YOLO detector or MaxViT classifier ---------------------
         self.vision = None
-        if self.camera is not None and HAVE_VISION:
-            ch = vision_ml.VisionChannel(weights)
-            if ch.load():
+        weights = weights or DEFAULT_WEIGHTS[vision]
+        if self.camera is not None:
+            ch = None
+            if vision == "maxvit" and HAVE_MAXVIT:
+                ch = vision_maxvit.MaxVitChannel(weights)
+            elif vision == "yolo" and HAVE_VISION:
+                ch = vision_ml.VisionChannel(weights)
+            if ch is not None and ch.load():
                 self.vision = ch
-            else:
+                if vision == "maxvit":
+                    thr = ch.detector.thresholds
+                    self.startup_notes.append(
+                        f"MaxViT thresholds fire {thr['fire']:.2f} / smoke "
+                        f"{thr['smoke']:.2f} come from D-Fire validation, not this "
+                        f"room - check with evaluate_on_frames.py")
+            elif ch is not None:
                 self.startup_notes.append(f"vision channel off: {ch.error}")
+
+        # -- boxes for the alert photo (display only) ---------------------
+        self.alert_boxes = None
+        if box_weights and self.camera is not None and HAVE_MAXVIT:
+            ab = vision_maxvit.AlertBoxes(box_weights)
+            if ab.load():
+                self.alert_boxes = ab
+            else:
+                self.startup_notes.append(f"alert boxes off: {ab.error}")
 
         # -- VLM ----------------------------------------------------------
         self.vlm = None
@@ -222,7 +263,7 @@ class FireSensePipeline:
             else:
                 res.notes.append(f"camera: {f.error}")
 
-        # -- YOLO ---------------------------------------------------------
+        # -- vision -------------------------------------------------------
         vision_confirmed = False
         if self.vision is not None and frame is not None:
             v = self.vision.update(frame)
@@ -270,6 +311,11 @@ class FireSensePipeline:
         if frame is not None and HAVE_CAMERA:
             try:
                 import cv2
+                if self.alert_boxes is not None:
+                    try:
+                        frame = self.alert_boxes.draw(frame)
+                    except Exception as exc:     # a box failure never blocks the alert
+                        res.notes.append(f"alert boxes failed: {exc}")
                 ok, buf = cv2.imencode(".jpg", frame)
                 image = buf.tobytes() if ok else None
             except Exception:
@@ -297,7 +343,10 @@ class FireSensePipeline:
     def channel_summary(self) -> str:
         on = ["chemical+thermal+IR (rule engine)"]
         if self.vision is not None:
-            on.append("YOLO vision")
+            on.append({"yolo": "YOLO vision",
+                       "maxvit": "MaxViT vision"}[self.vision_kind])
+        if self.alert_boxes is not None:
+            on.append("YOLO v2 boxes on alert photo")
         if self.vlm is not None:
             on.append("VLM")
         if self.feedback is not None:
@@ -328,7 +377,8 @@ def run(args) -> int:                                        # pragma: no cover
         src, camera_spec=args.camera, weights=args.weights,
         use_vlm=args.vlm, vlm_model=args.vlm_model,
         environment=args.environment, vision_every=args.vision_every,
-        log_csv=not args.no_log, send_alerts=not args.no_alerts)
+        log_csv=not args.no_log, send_alerts=not args.no_alerts,
+        vision=args.vision, box_weights=args.alert_boxes)
 
     print("=" * 70)
     print(f"  FireSense   source {desc}   env {args.environment}")
@@ -385,12 +435,20 @@ def main() -> None:                                          # pragma: no cover
     p.add_argument("--scenario", default="sudden_fire")
     p.add_argument("--camera", default=None,
                    help="webcam | webcam:1 | <esp32 ip> - omit for sensors only")
-    p.add_argument("--weights", default="models/fire_yolo.pt")
+    p.add_argument("--vision", choices=VISION_KINDS, default="yolo",
+                   help="yolo = vision_ml detector; maxvit = D-Fire classifier")
+    p.add_argument("--weights", default=None,
+                   help="default: models/fire_yolo.pt (yolo) or "
+                        "models/maxvit_dfire/best.pt (maxvit)")
+    p.add_argument("--alert-boxes", nargs="?", const=DEFAULT_BOX_WEIGHTS,
+                   default=None, metavar="WEIGHTS",
+                   help="draw YOLO boxes on the alert photo (display only); "
+                        f"default weights {DEFAULT_BOX_WEIGHTS}")
     p.add_argument("--vlm", action="store_true", help="describe scenes on escalation")
     p.add_argument("--vlm-model", default="moondream")
     p.add_argument("--environment", default=C.DEFAULT_ENVIRONMENT)
     p.add_argument("--vision-every", type=int, default=2,
-                   help="run YOLO every Nth reading (default 2)")
+                   help="run the vision model every Nth reading (default 2)")
     p.add_argument("--minutes", type=float, default=0.0, help="0 = until Ctrl+C")
     p.add_argument("--no-log", action="store_true")
     p.add_argument("--no-alerts", action="store_true")
