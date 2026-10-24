@@ -342,7 +342,7 @@ false positives described above.
 | `read_serial.py` | standalone USB link check |
 | `check_setup.py` | environment sanity check |
 | `extract_frames.py` | every Nth frame of a video → `data/vision_check_phone/<name>/` |
-| `run_tests.py` | test runner (83 tests, no pytest needed) |
+| `run_tests.py` | test runner (92 tests, no pytest needed) |
 | `data/` | a real captured hardware session, used as a regression fixture |
 
 ---
@@ -379,7 +379,14 @@ python extract_frames.py candle.mov --every 15     # -> data/vision_check_phone/
 holds frames from the deployment camera only. `extract_frames.py` refuses to
 write there, and `pick_vision_model.py --capture` refuses a video file.
 Results on phone frames are phone results. They don't replace the ESP32-CAM
-check.
+check. After you sort the frames into `normal/` and `flame/`, run:
+
+```bash
+python evaluate_on_frames.py --model models/maxvit_dfire/best.pt --frames-dir data/vision_check_phone/candle
+```
+
+It prints the same report, with a warning that these aren't ESP32-CAM frames.
+`data/vision_check_phone/` is git-ignored: these are photos of your home.
 
 ---
 
@@ -390,7 +397,7 @@ python run_tests.py            # everything
 python run_tests.py fusion     # one file
 ```
 
-83 tests. They cover the ordinary cases, but the ones worth knowing about came
+92 tests. They cover the ordinary cases, but the ones worth knowing about came
 from things that actually went wrong:
 
 - a leak already under way at power-on still alarms (calibration cannot deadlock)
