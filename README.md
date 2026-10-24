@@ -342,7 +342,7 @@ false positives described above.
 | `read_serial.py` | standalone USB link check |
 | `check_setup.py` | environment sanity check |
 | `extract_frames.py` | every Nth frame of a video → `data/vision_check_phone/<name>/` |
-| `run_tests.py` | test runner (92 tests, no pytest needed) |
+| `run_tests.py` | test runner (94 tests, no pytest needed) |
 | `data/` | a real captured hardware session, used as a regression fixture |
 
 ---
@@ -386,7 +386,8 @@ python evaluate_on_frames.py --model models/maxvit_dfire/best.pt --frames-dir da
 ```
 
 It prints the same report, with a warning that these aren't ESP32-CAM frames.
-`data/vision_check_phone/` is git-ignored: these are photos of your home.
+`data/vision_check_phone/` and `data/vision_check/` are git-ignored: these are
+photos of your home.
 
 ---
 
@@ -397,7 +398,7 @@ python run_tests.py            # everything
 python run_tests.py fusion     # one file
 ```
 
-92 tests. They cover the ordinary cases, but the ones worth knowing about came
+94 tests. They cover the ordinary cases, but the ones worth knowing about came
 from things that actually went wrong:
 
 - a leak already under way at power-on still alarms (calibration cannot deadlock)

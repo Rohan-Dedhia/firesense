@@ -12,6 +12,9 @@ data/.telegram_offset
 # frames extracted from phone videos of the room (extract_frames.py) -
 # photos of a private home, never committed
 data/vision_check_phone/
+# ESP32-CAM frames for the vision check (pick_vision_model.py --capture) -
+# also photos of the room
+data/vision_check/
 
 # trained model weights - too big for git, and rebuildable
 *.pt

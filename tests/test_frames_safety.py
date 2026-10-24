@@ -1,7 +1,8 @@
 """
 Tests that keep room photos and the vision check frames safe.
 
-    1. data/vision_check_phone/ is git-ignored (photos of a private home).
+    1. data/vision_check_phone/ and data/vision_check/ are git-ignored
+       (photos of a private home); the CSV regression fixture is not.
     2. pick_vision_model.py --capture deletes the previous frames only after
        the camera has opened AND delivered a first frame. A failed camera
        must never leave an empty folder where a good capture used to be.
@@ -50,17 +51,33 @@ def _quiet(fn, *a, **kw):
 # ---------------------------------------------------------------------------
 # 1. .gitignore
 # ---------------------------------------------------------------------------
+def _git_ignores(path: str) -> bool | None:
+    """True/False from `git check-ignore`; None without git or a checkout."""
+    if shutil.which("git") is None:
+        return None
+    r = subprocess.run(["git", "check-ignore", "-q", path], cwd=REPO, capture_output=True)
+    if r.returncode == 128:              # not a git checkout (e.g. a zip copy)
+        return None
+    return r.returncode == 0
+
+
 def test_phone_frames_are_git_ignored():
     lines = [l.strip() for l in (REPO / ".gitignore").read_text().splitlines()]
     assert "data/vision_check_phone/" in lines
-    if shutil.which("git") is None:
-        return
-    r = subprocess.run(["git", "check-ignore", "-q",
-                        "data/vision_check_phone/candle/candle_000030.jpg"],
-                       cwd=REPO, capture_output=True)
-    if r.returncode == 128:              # not a git checkout (e.g. a zip copy)
-        return
-    assert r.returncode == 0, "git does not ignore data/vision_check_phone/"
+    assert _git_ignores("data/vision_check_phone/candle/candle_000030.jpg") in (True, None)
+
+
+def test_esp32_check_frames_are_git_ignored():
+    lines = [l.strip() for l in (REPO / ".gitignore").read_text().splitlines()]
+    assert "data/vision_check/" in lines
+    for f in ("data/vision_check/normal/000.jpg", "data/vision_check/flame/019.jpg"):
+        assert _git_ignores(f) in (True, None), f"git does not ignore {f}"
+
+
+def test_the_replay_fixture_is_still_tracked():
+    # data/*.csv is the regression fixture and IS committed on purpose;
+    # the new ignore rules must not catch it.
+    assert _git_ignores("data/real_session_20260905.csv") in (False, None)
 
 
 # ---------------------------------------------------------------------------
