@@ -109,12 +109,32 @@ def filter_boxes(dets: list, thresholds: dict) -> list:
 # ---------------------------------------------------------------------------
 # the model - a thin shell, same interface as vision_ml.YoloFireDetector
 # ---------------------------------------------------------------------------
-def _default_device() -> str:
+def pick_device(cuda_ok: bool, mps_ok: bool) -> str:
+    """CUDA, then Apple MPS, then CPU. Pure, so the order can be tested on a
+    machine that has neither accelerator."""
+    if cuda_ok:
+        return "cuda"
+    if mps_ok:
+        return "mps"
+    return "cpu"
+
+
+def default_device() -> str:
+    """The best device this machine has. Without torch (or if a backend check
+    itself fails) the answer is CPU, never an error."""
     try:
         import torch
-        return "mps" if torch.backends.mps.is_available() else "cpu"
     except Exception:
         return "cpu"
+    try:
+        cuda_ok = bool(torch.cuda.is_available())
+    except Exception:
+        cuda_ok = False
+    try:
+        mps_ok = bool(torch.backends.mps.is_available())
+    except Exception:
+        mps_ok = False
+    return pick_device(cuda_ok, mps_ok)
 
 
 class MaxVitClassifier:
@@ -156,7 +176,7 @@ class MaxVitClassifier:
                 return False
             model = T.make_model(pretrained=False)
             model.load_state_dict(ck["model"])
-            self.device = self.device or _default_device()
+            self.device = self.device or default_device()
             self.model = model.to(self.device).eval()
             self._mean, self._std = T._normalise(model)
             self._size = int(ck.get("size", T.SIZE))
@@ -229,6 +249,9 @@ class AlertBoxes:
             self.error = (f"no validated thresholds next to {self.weights}; "
                           f"run `python train_yolo_v2.py --validate`")
             return False
+        # Left to itself ultralytics picks CUDA or CPU and never MPS, so the
+        # device is chosen here, by the same rule as the MaxViT channel.
+        self.detector.device = self.detector.device or default_device()
         if not self.detector.load():
             self.error = self.detector.error
             return False

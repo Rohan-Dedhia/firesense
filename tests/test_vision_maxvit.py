@@ -270,3 +270,79 @@ def test_pipeline_with_a_confident_maxvit_stays_below_critical():
         assert seen_vision, "the stub channel was never consulted"
     finally:
         _restore_camera()
+
+
+# ---------------------------------------------------------------------------
+# device fallback: CUDA, then MPS, then CPU - for MaxViT and the alert boxes
+# ---------------------------------------------------------------------------
+class _FakeTorch:
+    """Just enough of torch for default_device(); `None` = the check raises."""
+
+    def __init__(self, cuda, mps):
+        def check(v):
+            def is_available():
+                if v is None:
+                    raise RuntimeError("backend check failed")
+                return v
+            return is_available
+        self.cuda = type("cuda", (), {"is_available": staticmethod(check(cuda))})
+        self.backends = type("backends", (), {
+            "mps": type("mps", (), {"is_available": staticmethod(check(mps))})})
+
+
+def _with_torch(fake, fn):
+    """Run fn with `import torch` returning `fake` (None = not installed);
+    the real module, if any, is always put back."""
+    had, real = "torch" in sys.modules, sys.modules.get("torch")
+    sys.modules["torch"] = fake
+    try:
+        return fn()
+    finally:
+        if had:
+            sys.modules["torch"] = real
+        else:
+            sys.modules.pop("torch", None)
+
+
+def test_device_order_is_cuda_then_mps_then_cpu():
+    assert M.pick_device(cuda_ok=True, mps_ok=True) == "cuda"
+    assert M.pick_device(cuda_ok=True, mps_ok=False) == "cuda"
+    assert M.pick_device(cuda_ok=False, mps_ok=True) == "mps"
+    assert M.pick_device(cuda_ok=False, mps_ok=False) == "cpu"
+
+
+def test_default_device_follows_what_the_machine_has():
+    assert _with_torch(_FakeTorch(cuda=True, mps=False), M.default_device) == "cuda"
+    assert _with_torch(_FakeTorch(cuda=False, mps=True), M.default_device) == "mps"
+    assert _with_torch(_FakeTorch(cuda=False, mps=False), M.default_device) == "cpu"
+
+
+def test_default_device_is_cpu_without_torch_or_when_checks_fail():
+    assert _with_torch(None, M.default_device) == "cpu"          # not installed
+    assert _with_torch(_FakeTorch(cuda=None, mps=None), M.default_device) == "cpu"
+    # one broken backend check does not hide a working one
+    assert _with_torch(_FakeTorch(cuda=None, mps=True), M.default_device) == "mps"
+
+
+def test_an_explicit_device_is_kept():
+    assert M.MaxVitChannel("unused.pt", device="cpu").detector.device == "cpu"
+    assert M.AlertBoxes("unused.pt", device="cpu").detector.device == "cpu"
+
+
+def test_alert_boxes_choose_a_device_instead_of_leaving_it_to_ultralytics():
+    # ultralytics on its own picks CUDA or CPU, never MPS; the boxes must use
+    # the same rule as the MaxViT channel.
+    with tempfile.TemporaryDirectory() as d:
+        run = Path(d) / "run"
+        (run / "weights").mkdir(parents=True)
+        (run / "val_results.json").write_text(
+            json.dumps({"thresholds": {"fire": 0.2, "smoke": 0.16}}))
+        for fake, want in ((_FakeTorch(cuda=False, mps=True), "mps"),
+                           (_FakeTorch(cuda=False, mps=False), "cpu")):
+            ab = M.AlertBoxes(run / "weights" / "best.pt")
+            # Stub the model load: importing ultralytics under a fake torch
+            # would leave half-imported modules behind for later tests.
+            ab.detector.load = lambda: False
+            ok = _with_torch(fake, ab.load)
+            assert ok is False                                 # refused, not raised
+            assert ab.detector.device == want
