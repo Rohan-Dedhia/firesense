@@ -341,8 +341,45 @@ false positives described above.
 | `replay_csv.py` | re-runs a captured session CSV through the engine |
 | `read_serial.py` | standalone USB link check |
 | `check_setup.py` | environment sanity check |
-| `run_tests.py` | test runner (41 tests, no pytest needed) |
+| `extract_frames.py` | every Nth frame of a video → `data/vision_check_phone/<name>/` |
+| `run_tests.py` | test runner (83 tests, no pytest needed) |
 | `data/` | a real captured hardware session, used as a regression fixture |
+
+---
+
+## Testing without hardware
+
+Everything runs without the ESP32 node or the ESP32-CAM. Sensors come from
+`--source mock` (scripted scenarios), and the camera can be a video file:
+
+```bash
+python pipeline.py --source mock --scenario sudden_fire --camera demo.mp4 --vision maxvit
+python pipeline.py --source mock --scenario cooking_false_positive --camera kitchen.mov --camera-loop
+```
+
+- `--camera` takes `.mp4`, `.mov`, `.avi` or `.mkv`. The video plays at
+  real-time speed, so the pipeline samples it like a live camera.
+  `--camera-fps 5` slows it down (or speeds it up), and `--camera-loop`
+  restarts it at the end.
+- Without `--camera-loop`, the pipeline says "video ended" once and carries on
+  with the sensors only. A missing or unreadable file gives a clear startup
+  note instead of a crash.
+- `record_session.py --camera demo.mp4` also works, and `meta.json` records the
+  video as the camera source. Don't record training sessions this way with
+  real sensors: the frames would not show what the sensors measured.
+
+**Phone footage is not ESP32-CAM footage.** To look at a model on frames from
+a phone video:
+
+```bash
+python extract_frames.py candle.mov --every 15     # -> data/vision_check_phone/candle/
+```
+
+`data/vision_check/` is the adoption test for a vision model (hard rule 10) and
+holds frames from the deployment camera only. `extract_frames.py` refuses to
+write there, and `pick_vision_model.py --capture` refuses a video file.
+Results on phone frames are phone results. They don't replace the ESP32-CAM
+check.
 
 ---
 
@@ -353,7 +390,7 @@ python run_tests.py            # everything
 python run_tests.py fusion     # one file
 ```
 
-41 tests. They cover the ordinary cases, but the ones worth knowing about came
+83 tests. They cover the ordinary cases, but the ones worth knowing about came
 from things that actually went wrong:
 
 - a leak already under way at power-on still alarms (calibration cannot deadlock)
@@ -366,6 +403,10 @@ from things that actually went wrong:
 - a vision model that never false-alarms *because it detects nothing* is
   rejected, and so is one whose separation margin is too thin to survive a
   warmer evening
+- vision (YOLO or MaxViT) can only raise the level and never reaches CRITICAL
+  on its own, on CUDA, MPS or CPU
+- the video-file camera loops, ends cleanly and reports a missing or broken
+  file, all on a synthetic video written by the test itself
 
 ---
 

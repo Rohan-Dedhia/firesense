@@ -13,6 +13,7 @@ Everything else in this project is a component. This is the thing that runs:
     python pipeline.py --source serial --camera webcam
     python pipeline.py --source serial --camera 192.168.1.42 --vlm
     python pipeline.py --source serial --camera webcam --vision maxvit --alert-boxes
+    python pipeline.py --source mock --scenario sudden_fire --camera demo.mp4 --vision maxvit
 
 Why the rule engine is still here
 ---------------------------------
@@ -173,7 +174,8 @@ class FireSensePipeline:
                  environment: str = C.DEFAULT_ENVIRONMENT,
                  vision_every: int = 2, log_csv: bool = True,
                  send_alerts: bool = True, vision: str = "yolo",
-                 box_weights: Optional[str] = None):
+                 box_weights: Optional[str] = None,
+                 camera_opts: Optional[dict] = None):
         if vision not in VISION_KINDS:
             raise ValueError(f"vision must be one of {VISION_KINDS}, not {vision!r}")
         self.source = source
@@ -189,7 +191,8 @@ class FireSensePipeline:
         # -- camera -------------------------------------------------------
         self.camera = None
         if camera_spec and HAVE_CAMERA:
-            cam = camera_mod.make_camera(camera_spec)
+            # camera_opts (loop, fps) only matter for a video file
+            cam = camera_mod.make_camera(camera_spec, **(camera_opts or {}))
             if cam.open():
                 self.camera = cam
             else:
@@ -260,6 +263,12 @@ class FireSensePipeline:
             f = self.camera.read()
             if f.ok:
                 frame = f.image
+            elif getattr(f, "end_of_stream", False):
+                # A finished video is not a fault: say so once, then carry
+                # on with the sensors exactly as with no camera at all.
+                res.notes.append("camera: video ended - continuing on sensors only")
+                self.camera.close()
+                self.camera = None
             else:
                 res.notes.append(f"camera: {f.error}")
 
@@ -373,8 +382,13 @@ def run(args) -> int:                                        # pragma: no cover
     else:
         src, desc = ingest.MockSource(args.scenario), f"mock:{args.scenario}"
 
+    camera_opts = {}
+    if args.camera and camera_mod is not None and camera_mod.is_video_spec(args.camera):
+        camera_opts = {"loop": args.camera_loop, "fps": args.camera_fps}
+    elif args.camera_loop or args.camera_fps:
+        print("note: --camera-loop / --camera-fps apply to video files only; ignored")
     pipe = FireSensePipeline(
-        src, camera_spec=args.camera, weights=args.weights,
+        src, camera_spec=args.camera, camera_opts=camera_opts, weights=args.weights,
         use_vlm=args.vlm, vlm_model=args.vlm_model,
         environment=args.environment, vision_every=args.vision_every,
         log_csv=not args.no_log, send_alerts=not args.no_alerts,
@@ -434,7 +448,12 @@ def main() -> None:                                          # pragma: no cover
     p.add_argument("--url", default=None)
     p.add_argument("--scenario", default="sudden_fire")
     p.add_argument("--camera", default=None,
-                   help="webcam | webcam:1 | <esp32 ip> - omit for sensors only")
+                   help="webcam | webcam:1 | <esp32 ip> | video.mp4/.mov/.avi/.mkv "
+                        "- omit for sensors only")
+    p.add_argument("--camera-loop", action="store_true",
+                   help="video file: start again at the end instead of stopping")
+    p.add_argument("--camera-fps", type=float, default=None,
+                   help="video file: playback rate (default: the file's own)")
     p.add_argument("--vision", choices=VISION_KINDS, default="yolo",
                    help="yolo = vision_ml detector; maxvit = D-Fire classifier")
     p.add_argument("--weights", default=None,

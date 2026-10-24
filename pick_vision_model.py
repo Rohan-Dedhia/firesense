@@ -52,6 +52,14 @@ def capture(case: str, n: int, camera_spec: str, delay: float) -> int:
     if case not in CASES:
         print(f"case must be one of {CASES}")
         return 1
+    # Checked BEFORE the old frames below are deleted. These folders are the
+    # adoption test (CLAUDE.md rule 10) and must hold deployment-camera
+    # frames only; phone or other recorded footage goes elsewhere.
+    if cam_mod.is_video_spec(camera_spec):
+        print(f"  refusing to capture from a video file ({camera_spec}) into {CHECK_DIR}:")
+        print("  these frames must come from the deployment camera (the ESP32-CAM).")
+        print(f"  For recorded footage use:  python extract_frames.py {camera_spec}")
+        return 1
 
     out = CHECK_DIR / case
     out.mkdir(parents=True, exist_ok=True)

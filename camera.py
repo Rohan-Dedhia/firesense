@@ -10,16 +10,22 @@ detail rather than something baked into the vision code:
     Esp32CamSource   - an ESP32-CAM serving JPEGs over WiFi. Point it at the
                        /capture endpoint the stock CameraWebServer sketch
                        already provides.
+    VideoFileSource  - a recorded video (.mp4 .mov .avi .mkv), played back at
+                       real-time speed by default. For testing and demos
+                       without the ESP32-CAM - NOT for the vision check
+                       frames, which must come from the deployment camera.
 
 Swapping between them is one line at the call site. Everything downstream -
 recording, detection, fusion - sees the same BGR numpy frames either way.
 
     cam = make_camera("webcam:0")
     cam = make_camera("http://192.168.1.42/capture")
+    cam = make_camera("demo.mp4", loop=True)
 """
 from __future__ import annotations
 
 import time
+from pathlib import Path
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,6 +54,7 @@ class Frame:
     image: Optional[np.ndarray] = None          # BGR, as OpenCV produces
     ts: float = 0.0                             # wall clock at capture
     error: str = ""
+    end_of_stream: bool = False                 # a finished video, not a fault
 
     @property
     def shape(self) -> tuple:
@@ -198,9 +205,152 @@ class Esp32CamSource(FrameSource):
 
 
 # ---------------------------------------------------------------------------
+# recorded video
+# ---------------------------------------------------------------------------
+VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi", ".mkv")
+END_OF_STREAM = "end of stream"
+FALLBACK_FPS = 25.0                 # when a file does not report its own rate
+
+
+def is_video_spec(spec: str) -> bool:
+    """True when a camera spec names a video file (by extension)."""
+    return Path((spec or "").strip()).suffix.lower() in VIDEO_EXTENSIONS
+
+
+class VideoFileSource(FrameSource):
+    """
+    A video file played back as if it were a camera.
+
+    realtime=True (default): the frame returned is the one at the current
+    wall-clock position in the video, like a live camera. Reading slower than
+    the video's frame rate skips frames; reading faster returns the same frame
+    again, exactly as polling an ESP32-CAM /capture faster than the scene
+    changes would. `fps` replaces the file's own rate on that clock: a
+    30 fps file played with fps=10 runs three times slower than recorded.
+
+    realtime=False: every read returns the next frame, as fast as it is
+    called. For tools that want every frame (extract_frames.py, tests).
+
+    At the end of the file it rewinds when loop=True; otherwise every read
+    returns Frame(ok=False, end_of_stream=True, error="end of stream").
+    """
+
+    name = "video"
+
+    def __init__(self, path: str | Path, loop: bool = False, realtime: bool = True,
+                 fps: Optional[float] = None):
+        self.path = Path(path).expanduser()
+        self.loop = loop
+        self.realtime = realtime
+        self.fps_override = fps
+        self.cap = None
+        self.error = ""
+        self.native_fps = 0.0
+        self.play_fps = 0.0
+        self.frame_count = 0
+        self.ended = False
+        self._pos = 0               # index of the next frame the decoder returns
+        self._last = None           # last decoded frame (realtime repeats it)
+        self._last_index = -1
+        self._t0 = 0.0
+
+    # -- open / close -----------------------------------------------------
+    def _open_capture(self) -> bool:
+        if self.cap is not None:
+            self.cap.release()
+        self.cap = cv2.VideoCapture(str(self.path))
+        return self.cap.isOpened()
+
+    def open(self) -> bool:
+        if not CV2_AVAILABLE:
+            self.error = f"OpenCV not installed ({CV2_ERROR}). pip install opencv-python"
+            return False
+        if not self.path.is_file():
+            self.error = f"video file not found: {self.path}"
+            return False
+        if self.fps_override is not None and not self.fps_override > 0:
+            self.error = f"--camera-fps must be above 0 (got {self.fps_override})"
+            return False
+        if not self._open_capture():
+            self.error = (f"OpenCV could not open {self.path} as a video "
+                          f"(unsupported codec or not a video file)")
+            self.close()
+            return False
+        # Opening is not enough: a corrupt file can open and yield nothing.
+        got, img = self.cap.read()
+        if not got or img is None:
+            self.error = f"{self.path} opened but no frame could be decoded"
+            self.close()
+            return False
+        fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        self.native_fps = fps if 0 < fps < 1000 else FALLBACK_FPS
+        self.play_fps = float(self.fps_override or self.native_fps)
+        self.frame_count = max(0, int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
+        self._open_capture()        # back to frame 0; reopening beats seeking
+        self._pos, self._last, self._last_index = 0, None, -1
+        self.ended = False
+        self._t0 = time.monotonic()
+        return True
+
+    def close(self) -> None:
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+
+    # -- reading ----------------------------------------------------------
+    def _rewind(self) -> bool:
+        if not self._open_capture():
+            return False
+        self._pos, self._t0 = 0, time.monotonic()
+        return True
+
+    def _end(self) -> Frame:
+        self.ended = True
+        return Frame(ok=False, ts=time.time(), error=END_OF_STREAM,
+                     end_of_stream=True)
+
+    def _decode_next(self) -> Optional[np.ndarray]:
+        got, img = self.cap.read()
+        if not got or img is None:
+            return None
+        self._last, self._last_index = img, self._pos
+        self._pos += 1
+        return img
+
+    def read(self) -> Frame:
+        if self.cap is None:
+            if self.ended:
+                return self._end()
+            return Frame(ok=False, ts=time.time(), error=self.error or "video not opened")
+        if self.ended:
+            return self._end()
+
+        if self.realtime:
+            target = int((time.monotonic() - self._t0) * self.play_fps)
+            if self._last is not None and target <= self._last_index:
+                # polled faster than the video runs: the scene has not moved on
+                return Frame(ok=True, image=self._last.copy(), ts=time.time())
+            while self._pos < target:           # skip, without decoding
+                if not self.cap.grab():
+                    break
+                self._pos += 1
+
+        img = self._decode_next()
+        if img is None:                         # ran off the end of the file
+            if not self.loop:
+                return self._end()
+            if not self._rewind() or self._decode_next() is None:
+                self.error = f"could not rewind {self.path}"
+                return Frame(ok=False, ts=time.time(), error=self.error)
+            img = self._last
+        return Frame(ok=True, image=img.copy(), ts=time.time())
+
+
+# ---------------------------------------------------------------------------
 # factory
 # ---------------------------------------------------------------------------
-def make_camera(spec: str) -> FrameSource:
+def make_camera(spec: str, *, loop: bool = False, fps: Optional[float] = None,
+                realtime: bool = True) -> FrameSource:
     """
     Turn a string into a frame source.
 
@@ -208,8 +358,15 @@ def make_camera(spec: str) -> FrameSource:
         "webcam:1"                     -> laptop camera, index 1
         "192.168.1.42"                 -> ESP32-CAM, /capture appended
         "http://192.168.1.42/capture"  -> ESP32-CAM, exactly that URL
+        "demo.mp4" (.mov .avi .mkv)    -> VideoFileSource
+
+    loop / fps / realtime apply to video files only. A video spec is routed
+    by its extension even if the file is missing, so open() can say "file not
+    found" instead of trying to reach http://demo.mp4.
     """
     spec = (spec or "webcam").strip()
+    if is_video_spec(spec):
+        return VideoFileSource(spec, loop=loop, realtime=realtime, fps=fps)
     low = spec.lower()
     if low in ("webcam", "laptop", "usb"):
         return WebcamSource(0)
